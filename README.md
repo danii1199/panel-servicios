@@ -32,6 +32,9 @@ cd panel-servicios
 | ↑ ↓ o ratón | Moverse |
 | Enter / espacio | Arrancar o parar |
 | `l` | Log en directo (`/` filtrar, `f` seguir el final, `Esc` volver) |
+| `a` | Añadir a «Mis servicios» (sobre un servidor detectado, se rellena con sus datos) |
+| `m` | Editar uno de «Mis servicios» |
+| `Supr` | Quitarlo de la lista (no lo para ni borra nada) |
 | `e` | Arrancar al encender (sí/no) |
 | `g` | Liberar la GPU de Ollama |
 | `r` | Comprobar ahora |
@@ -41,7 +44,8 @@ Para el servicio Docker la interfaz se aparta un momento y `sudo` pide la contra
 
 ## Dónde guarda las cosas
 
-- `~/.config/panel-servicios/servicios.json`: tus servicios (nombre, carpeta, comando y puerto). Se añaden desde la
-  app de escritorio o editando el archivo.
+- `~/.config/panel-servicios/servicios.json`: tus servicios (nombre, carpeta, comando, puerto y variables). Se
+  añaden desde cualquiera de las dos versiones o editando el archivo. La de terminal lo relee antes de guardar; la de
+  escritorio lo lee solo al abrirse, así que tras cambiarlo desde fuera hay que cerrarla y abrirla.
 - `~/.config/panel-servicios/ajustes.json`: ajustes del panel (dirección de Ollama, cada cuánto comprobar…).
 - `~/.local/state/panel-servicios/logs/`: la salida de los servicios que arranca el panel.

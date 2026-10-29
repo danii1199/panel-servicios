@@ -353,18 +353,41 @@ class Contenedor:
         return {"titulo": "Contenedor " + self.nombre, "cmd": ["docker", "logs", "--timestamps", self.nombre]}
 
 
+def puertos_red_equipo():
+    """{id de contenedor: [puertos]} de los que usan la red del equipo (network_mode: host).
+
+    Docker no enseña sus puertos (no los publica: escuchan directamente en el equipo), así que se buscan los
+    procesos que escuchan y se mira en su cgroup a qué contenedor pertenecen."""
+    res = {}
+    for pid, puertos in puertos_escuchando().items():
+        try:
+            m = re.search(r"docker[-/]([0-9a-f]{64})", Path(f"/proc/{pid}/cgroup").read_text())
+        except OSError:
+            continue
+        if m:
+            lst = res.setdefault(m.group(1), [])
+            lst += [p for p in puertos if p not in lst]
+    return res
+
+
 def contenedores():
     """Lista de contenedores con su estado, o None si Docker no responde."""
-    ok, out = run(["docker", "ps", "-a", "--format",
+    ok, out = run(["docker", "ps", "-a", "--no-trunc", "--format",
                    '{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Label "com.docker.compose.project"}}\t{{.Ports}}\t'
                    '{{.Label "com.docker.compose.project.config_files"}}\t'
-                   '{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.service"}}'],
+                   '{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.service"}}\t'
+                   '{{.ID}}'],
                   timeout=8)
     if not ok:
         return None
-    res = []
+    res, red_equipo = [], None
     for line in out.splitlines():
-        n, st, status, proj, ports, compose, carpeta, servicio = (line.split("\t") + [""] * 8)[:8]
+        n, st, status, proj, ports, compose, carpeta, servicio, cid = (line.split("\t") + [""] * 9)[:9]
+        if not ports and st == "running":
+            if red_equipo is None:
+                red_equipo = puertos_red_equipo()
+            if red_equipo.get(cid):
+                ports = "red del equipo · puerto " + ", ".join(map(str, sorted(red_equipo[cid])))
         det = status + (f" · {ports}" if ports else "")
         res.append((Contenedor(n, proj, compose, carpeta, servicio), {"on": st == "running", "detalle": det, "inicio": None}))
     return res

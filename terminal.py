@@ -6,9 +6,11 @@ ventanas, no las abre). La interfaz es de Textual. Las comprobaciones y acciones
 tabla se actualiza con call_from_thread, así la terminal nunca se queda bloqueada.
 
 Se lanza con el comando `servicios` (~/.local/bin/servicios), que usa el entorno .venv de esta carpeta.
+«Mis servicios» se añaden, cambian y quitan aquí también (a, m, Supr): van a ~/.config/panel-servicios/servicios.json.
 """
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -16,9 +18,9 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, Label, RichLog, Static, TextArea
 
 import panel as p
 
@@ -73,8 +75,7 @@ def comprobar(gateway, creador, limpieza, docker, hay):
                                            (limpieza, limpieza.estado, hay["limpieza"])) if si]
     return [
         ("🦞 OpenClaw", openclaw, ""),
-        ("🧩 Mis servicios", regs, f"Aún no has añadido ninguno (se añaden en {p.corto(p.CONFIG)} "
-                                   "o desde el panel de escritorio)"),
+        ("🧩 Mis servicios", regs, "Aún no has añadido ninguno: pulsa «a» para añadir uno"),
         ("🔌 Otros servidores detectados", det, "Ningún otro programa de desarrollo escuchando en un puerto"),
         ("🦙 Ollama", [("ollama", ollama)] if ollama else [], ""),
         ("🐳 Docker", ([(docker, docker.estado())] + [(c, e) for c, e in (conts or [])]) if hay["docker"] else [],
@@ -96,6 +97,135 @@ def clave_de(serv):
     if isinstance(serv, p.Detectado):
         return f"det:{serv.pid}"
     return f"{type(serv).__name__}:{serv.nombre}"
+
+
+def guardar_servicio(nuevo, original=None):
+    """Añade un servicio a servicios.json o cambia el que se llamaba `original`. Devuelve un error o None.
+
+    Se relee el archivo antes de escribir: así no se pisa lo que se haya cambiado desde otro sitio mientras tanto."""
+    lista = p.cargar_registrados()
+    if any(s["nombre"] == nuevo["nombre"] and s["nombre"] != original for s in lista):
+        return "Ya hay un servicio con ese nombre"
+    i = next((i for i, s in enumerate(lista) if original is not None and s["nombre"] == original), None)
+    if i is None:
+        lista.append(nuevo)
+    else:
+        lista[i] = nuevo
+    p.guardar_registrados(lista)
+    return None
+
+
+def quitar_servicio(nombre):
+    p.guardar_registrados([s for s in p.cargar_registrados() if s["nombre"] != nombre])
+
+
+def datos_de_detectado(x):
+    """Lo que se rellena al guardar en «Mis servicios» un servidor detectado (como guardar_detectado de panel.py)."""
+    cmd = shlex.join([Path(x.args[0]).name] + x.args[1:]) if x.args else x.comm
+    nombre = next((Path(a).name for a in reversed(x.args) if "." in Path(a).name), x.comm)
+    return {"nombre": nombre, "carpeta": p.corto(x.cwd), "comando": cmd,
+            "puerto": x.puertos[0] if x.puertos else None}
+
+
+class FormServicio(ModalScreen):
+    """Añadir o editar uno de «Mis servicios»: los mismos campos que DialogoServicio de panel.py."""
+
+    BINDINGS = [Binding("escape", "cancelar", "Cancelar"), Binding("ctrl+s", "guardar", "Guardar", priority=True)]
+
+    def __init__(self, datos=None, original=None):
+        super().__init__()
+        self.datos, self.original = datos or {}, original  # original: nombre del servicio que se edita
+
+    def compose(self) -> ComposeResult:
+        d = self.datos
+        with Vertical(id="form"):
+            yield Static(f"[b]{'Editar' if self.original else 'Añadir'} servicio[/b]")
+            yield Label("Nombre")
+            yield Input(d.get("nombre", ""), placeholder="Mi API", id="nombre")
+            yield Label("Carpeta (o la ruta de un script: se rellenan solos carpeta, comando y nombre)")
+            yield Input(d.get("carpeta", "~/Proyectos"), id="carpeta")
+            yield Label("Comando")
+            yield Input(d.get("comando", ""), placeholder="python3 app.py   ·   node server.js   ·   npm run dev",
+                        id="comando")
+            yield Label("Puerto (opcional)")
+            yield Input(str(d.get("puerto") or ""), placeholder="8000", type="integer", id="puerto")
+            yield Label("Variables de entorno (opcional, una por línea: CLAVE=valor)")
+            yield TextArea(p.cfg.pares_a_texto(d.get("variables") or {}), id="variables")
+            yield Static("[dim]El comando se ejecuta dentro de la carpeta, como en una terminal. Con puerto, se "
+                         "reconoce por el puerto; sin él, por la carpeta y el comando.[/dim]")
+            yield Static("", id="form-error")
+            with Horizontal(id="form-botones"):
+                yield Button("Guardar (Ctrl+S)", variant="primary", id="guardar")
+                yield Button("Cancelar (Esc)", id="cancelar")
+
+    def valores(self):
+        """El dict del servicio, o un texto con lo que falta o está mal."""
+        v = {k: self.query_one(f"#{k}", Input).value.strip() for k in ("nombre", "carpeta", "comando", "puerto")}
+        ruta = os.path.expanduser(v["carpeta"])
+        if os.path.isfile(ruta):  # han puesto un script: como «Elegir script…» del panel de escritorio
+            carpeta = os.path.dirname(os.path.abspath(ruta))
+            v["comando"] = v["comando"] or p.comando_para(ruta)
+            v["nombre"] = v["nombre"] or (os.path.basename(carpeta) if ruta.endswith("package.json")
+                                          else os.path.basename(ruta))
+            ruta = carpeta
+        falta = [k for k in ("nombre", "carpeta", "comando") if not v[k]]
+        if falta:
+            return "Falta: " + ", ".join(falta)
+        if not os.path.isdir(ruta):
+            return f"La carpeta no existe: {ruta}"
+        if v["puerto"] and not v["puerto"].isdigit():
+            return "El puerto tiene que ser un número"
+        d = {"nombre": v["nombre"], "carpeta": p.corto(os.path.abspath(ruta)), "comando": v["comando"],
+             "puerto": int(v["puerto"]) if v["puerto"] else None}
+        variables = p.cfg.texto_a_pares(self.query_one("#variables", TextArea).text)
+        if variables:
+            d["variables"] = variables
+        return d
+
+    def action_guardar(self):
+        d = self.valores()
+        error = d if isinstance(d, str) else guardar_servicio(d, self.original)
+        if error:
+            self.query_one("#form-error", Static).update(f"[{ROJO}]{error}[/]")
+            return
+        self.dismiss(d)
+
+    def action_cancelar(self):
+        self.dismiss(None)
+
+    @on(Input.Submitted)
+    def enter(self):
+        self.action_guardar()
+
+    @on(Button.Pressed, "#guardar")
+    def boton_guardar(self):
+        self.action_guardar()
+
+    @on(Button.Pressed, "#cancelar")
+    def boton_cancelar(self):
+        self.action_cancelar()
+
+
+class Confirmar(ModalScreen):
+    """Pregunta de sí o no: «s» o Enter = sí; «n» o Esc = no."""
+
+    BINDINGS = [Binding("s,enter", "si", "Sí"), Binding("n,escape", "no", "No")]
+
+    def __init__(self, pregunta, detalle=""):
+        super().__init__()
+        self.pregunta, self.detalle = pregunta, detalle
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="aviso"):
+            yield Static(f"[b]{self.pregunta}[/b]", id="aviso-titulo")
+            yield Static(self.detalle)
+            yield Static("[dim]s = sí · n = no[/dim]")
+
+    def action_si(self):
+        self.dismiss(True)
+
+    def action_no(self):
+        self.dismiss(False)
 
 
 class Aviso(ModalScreen):
@@ -208,11 +338,21 @@ class PanelTerminal(App):
     #aviso { width: 80%; max-width: 100; height: auto; padding: 1 2; background: $panel;
              border: thick $error; }
     #aviso-titulo { padding-bottom: 1; }
-    Aviso { align: center middle; }
+    Aviso, Confirmar, FormServicio { align: center middle; }
+    #form { width: 90%; max-width: 100; height: auto; max-height: 100%; padding: 1 2; background: $panel;
+            border: thick $primary; overflow-y: auto; }
+    #form Label { margin-top: 1; }
+    #variables { height: 5; }
+    #form-error { margin-top: 1; }
+    #form-botones { height: auto; margin-top: 1; }
+    #form-botones Button { margin-right: 2; }
     """
     BINDINGS = [
         Binding("space", "alternar", "Arrancar/Parar"),
         Binding("l", "logs", "Logs"),
+        Binding("a", "anadir", "Añadir"),
+        Binding("m", "editar", "Editar"),
+        Binding("delete", "quitar", "Quitar"),
         Binding("e", "inicio", "Al encender"),
         Binding("g", "liberar", "Liberar GPU"),
         Binding("r", "refrescar", "Comprobar"),
@@ -305,8 +445,9 @@ class PanelTerminal(App):
         return (k, *self.filas[k]) if k in self.filas else (None, None, None)
 
     def check_action(self, action, parameters):
-        # los atajos de la lista no valen (ni se enseñan) en la pantalla de logs
-        if action in {"alternar", "logs", "inicio", "liberar", "refrescar"} and isinstance(self.screen, VisorLog):
+        # los atajos de la lista no valen (ni se enseñan) en la pantalla de logs ni con un formulario o aviso abierto
+        if action in {"alternar", "logs", "inicio", "liberar", "refrescar", "anadir", "editar", "quitar"} \
+                and len(self.screen_stack) > 1:
             return False
         return True
 
@@ -389,6 +530,39 @@ class PanelTerminal(App):
 
     def action_refrescar(self):
         self.refrescar()
+
+    # --- mis servicios ---
+    def guardado(self, d):
+        if d:
+            self.notify(f"«{d['nombre']}» guardado en {p.corto(p.CONFIG)}")
+            self.refrescar()
+
+    def action_anadir(self):
+        _, serv, _ = self.actual()  # sobre un servidor detectado, se rellena con lo suyo
+        self.push_screen(FormServicio(datos_de_detectado(serv) if isinstance(serv, p.Detectado) else None),
+                         self.guardado)
+
+    def action_editar(self):
+        _, serv, _ = self.actual()
+        if not isinstance(serv, p.Registrado):
+            self.notify("Solo se pueden editar los de «Mis servicios» (con «a» se añade uno)", severity="warning")
+            return
+        self.push_screen(FormServicio(dict(serv.d), original=serv.nombre), self.guardado)
+
+    def action_quitar(self):
+        _, serv, _ = self.actual()
+        if not isinstance(serv, p.Registrado):
+            self.notify("Solo se pueden quitar los de «Mis servicios»", severity="warning")
+            return
+
+        def fin(si):
+            if si:
+                quitar_servicio(serv.nombre)
+                self.notify(f"«{serv.nombre}» quitado de la lista")
+                self.refrescar()
+
+        self.push_screen(Confirmar(f"¿Quitar «{serv.nombre}» de la lista?",
+                                   "Solo se quita del panel: no se para ni se borra nada de su carpeta."), fin)
 
 
 if __name__ == "__main__":
